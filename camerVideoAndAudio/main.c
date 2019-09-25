@@ -3,16 +3,19 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
 #include <libavdevice/avdevice.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/time.h>
+#include <libavutil/audio_fifo.h>
 #include <SDL2/SDL.h>
 
-#define ENABLE_AUDIO 0
+#define ENABLE_AUDIO 1
 #define ENABLE_SDL 0
 
 char* device_name_v = "video=Logitech HD Webcam C270";
 char* device_name_a = "audio=麦克风 (HD Webcam C270)";
+int ret;
 // input params
 AVFormatContext* fmt_ctx_v = NULL;
 AVFormatContext* fmt_ctx_a = NULL;
@@ -33,18 +36,22 @@ AVCodec* ocodec_a = NULL;
 AVCodecContext* ocodec_ctx_a = NULL;
 AVStream* video_st;
 AVStream* audio_st;
+AVAudioFifo* fifo = NULL;
+uint8_t** converted_input_samples = NULL;
 
 // time base
 AVRational time_base_q = {1, AV_TIME_BASE};
 int aud_next_pts = 0, vid_next_pts = 0;
 int encode_video = 1, encode_audio = 1;
 int framecnt = 0;
+int nb_samples = 0;
 
 // sws params
 int64_t pckCount = 0;
 uint8_t* buffer;
 int buf_size;
 struct SwsContext* pic_convert_ctx;
+struct SwrContext* aud_convert_ctx;
 
 // SDL
 int screen_w, screen_h;
@@ -229,6 +236,19 @@ int main(int argc, char* argv[]) {
                                      codec_ctx_v->pix_fmt, ocodec_ctx_v->width,
                                      ocodec_ctx_v->height, ocodec_ctx_v->pix_fmt,
                                      SWS_BICUBIC, NULL, NULL, NULL);
+    aud_convert_ctx = swr_alloc_set_opts(NULL,
+                      av_get_default_channel_layout(ocodec_ctx_a->channels),
+                      ocodec_ctx_a->sample_fmt, ocodec_ctx_a->sample_rate,
+                      av_get_default_channel_layout(fmt_ctx_a->streams[audio_idx]->codecpar->channels),
+                      codec_ctx_a->sample_fmt, codec_ctx_a->sample_rate,
+                      0, NULL);
+    swr_init(aud_convert_ctx);
+    fifo = av_audio_fifo_alloc(ocodec_ctx_a->sample_fmt, ocodec_ctx_a->channels, 1);
+    if (!(converted_input_samples = (uint8_t**)calloc(ocodec_ctx_a->channels, 
+        sizeof(**converted_input_samples)))) {
+            printf("Could not allocate converted input sample pointers\n");
+            return -1;
+    }
 #if ENABLE_SDL
     // Init SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) {
@@ -253,9 +273,8 @@ int main(int argc, char* argv[]) {
     int i = 0;
     while (i++ < 2000) {
         // deal with video
-        //if (encode_video && 
-          //  (!encode_audio || av_compare_ts(vid_next_pts, time_base_q, aud_next_pts, time_base_q) <= 0)) {
-            printf("%d\n", i);
+        if (encode_video && 
+            (!encode_audio || av_compare_ts(vid_next_pts, time_base_q, aud_next_pts, time_base_q) <= 0)) {
             if (av_read_frame(fmt_ctx_v, pkt) < 0) {
                 printf("Failed to read frame from Carmer\n");
                 return -1;
@@ -289,6 +308,7 @@ int main(int argc, char* argv[]) {
                 pktEnc->dts = pktEnc->pts;
                 pktEnc->duration = av_rescale_q(calc_duration, time_base_q, time_base);
                 pktEnc->pos = -1;
+                printf("%d\n", calc_duration);
 
                 // next pts
                 vid_next_pts = framecnt * calc_duration;
@@ -300,16 +320,135 @@ int main(int argc, char* argv[]) {
                     av_usleep(pts_time - now_time);
                 }
 
-                //if (av_write_frame(ofmt_ctx, pktEnc) < 0) {
                 if (av_interleaved_write_frame(ofmt_ctx, pktEnc) < 0) {
                     printf("Failed to store the pkt.\n");
                     return -1;
                 }
+                av_packet_unref(pkt), av_packet_unref(pktEnc);
             }
-            av_packet_unref(pkt), av_packet_unref(pktEnc);
-        //}
-    }
+        }
+        else {
+            // deal with audio
+            const int output_frame_size = ocodec_ctx_a->frame_size;
+            // If there are not enough data for the encoder, get more from the input
+            if (av_audio_fifo_size(fifo) < output_frame_size) {
+                AVFrame* audio_input_frame = av_frame_alloc();
+                if (!audio_input_frame) {
+                    printf("Failed to alloc the input audio frame\n");
+                    return -1;
+                }
+                AVPacket audio_input_pkt;
+                av_init_packet(&audio_input_pkt);
+                audio_input_pkt.data = NULL;
+                audio_input_pkt.size = 0;
+                // Read one audio frame from the carmer
+                if ((ret = av_read_frame(fmt_ctx_a, &audio_input_pkt)) < 0) {
+                    if (ret == AVERROR_EOF)
+                        encode_audio = 0;
+                    else {
+                        printf("Failed to read audio frame\n");
+                        return ret;
+                    }
+                }
+                // Decode the input audio frame and store into fifo
+                if ((ret = avcodec_decode_audio4(codec_ctx_a, audio_input_frame, &got_frame, 
+                     &audio_input_pkt)) < 0) {
+                    printf("Failed to decode audio frame\n");
+                    return ret;
+                }
+                av_packet_unref(&audio_input_pkt);
+                if (got_frame) {
+                    // Allocate memory for the samples of all channels in one consecutive
+				    // block for convenience.
+                    if ((ret = av_samples_alloc(converted_input_samples, NULL, ocodec_ctx_a->channels,
+                         audio_input_frame->nb_samples, ocodec_ctx_a->sample_fmt, 0)) < 0) {
+                        printf("Failed to allocate converted input samples\n");
+                        av_freep(&(*converted_input_samples)[0]);
+                        free(*converted_input_samples);
+                        return ret;    
+                    }
+                    // Convert the samples using the resampler
+                    if ((ret = swr_convert(aud_convert_ctx, converted_input_samples,
+                         audio_input_frame->nb_samples, (const uint8_t**)audio_input_frame->extended_data,
+                         audio_input_frame->nb_samples)) < 0) {
+                         printf("Failed to convert the input audio samples\n");
+                         return ret;
+                    }
+                    if ((ret = av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) +
+                         audio_input_frame->nb_samples)) < 0) {
+                         printf("Failed to reallocate fifo.\n");
+                         return ret;
+                    }
+                    // Store th new samples in fifo buffer
+                    if (av_audio_fifo_write(fifo, (void**)converted_input_samples,
+                        audio_input_frame->nb_samples) < audio_input_frame->nb_samples) {
+                        printf("Failed to write audio data to fifo.\n");
+                        return -1;
+                    }
+                }
+            }
+            // If we have enough audio data for the encoder.
+            if (av_audio_fifo_size(fifo) >= output_frame_size) {
+                AVFrame* audio_output_frame = av_frame_alloc();
+                if (!audio_output_frame) {
+                    printf("Failed to alloctate the audio output frame.\n");
+                    return -1;
+                } 
+                const int frame_size = FFMIN(av_audio_fifo_size(fifo), output_frame_size);
+                // Set the frame params
+                audio_output_frame->nb_samples = frame_size;
+                audio_output_frame->channel_layout = ocodec_ctx_a->channel_layout;
+                audio_output_frame->format = ocodec_ctx_a->sample_fmt;
+                audio_output_frame->sample_rate = ocodec_ctx_a->sample_rate;
+                if ((ret = av_frame_get_buffer(audio_output_frame, 0)) < 0) {
+                    printf("Failed to allocate audio output buffer.\n");
+                    av_frame_free(&audio_output_frame);
+                    return -1;
+                }
+                // Read data from fifo to fill the output frame
+                if (av_audio_fifo_read(fifo, (void **)audio_output_frame->data, frame_size) < frame_size) {
+                    printf("Failed to read audio data from fifo to fill output frame\n");
+                    return -1;
+                }
+                // 
+                AVPacket audio_output_pkt;
+                av_init_packet(&audio_output_pkt);
+                audio_output_pkt.data = NULL, audio_output_pkt.size = 0;
+                if (audio_output_frame) {
+                    nb_samples += audio_output_frame->nb_samples;
+                }
+                if ((ret = avcodec_encode_audio2(ocodec_ctx_a, &audio_output_pkt,
+                     audio_output_frame, &got_pkt)) < 0) {
+                     printf("Failed to encode the audio frame.\n");
+                     return -1;
+                }
+                if (got_pkt) {
+                    audio_output_pkt.stream_index = 1;
+                    AVRational time_base = audio_st->time_base;
+                    AVRational r_framerate1 = {fmt_ctx_a->streams[audio_idx]->codecpar->sample_rate, 1};
+                    int64_t calac_duration = (double) (AV_TIME_BASE) * (1 / av_q2d(r_framerate1));
+                    printf("%d\n", calac_duration);
 
+                    audio_output_pkt.pts = av_rescale_q(nb_samples * calac_duration, time_base_q, time_base);
+                    audio_output_pkt.dts = audio_output_pkt.pts;
+                    //audio_output_pkt.duration = audio_output_frame->nb_samples;
+                    audio_output_pkt.duration = av_rescale_q(calac_duration, time_base_q, time_base);
+
+                    aud_next_pts = nb_samples * calac_duration;
+                    int64_t pts_time = av_rescale_q(audio_output_pkt.pts, time_base, time_base_q);
+                    int64_t now_time = av_gettime() - start_time;
+                    if ((pts_time > now_time) && ((aud_next_pts + pts_time - now_time)) < vid_next_pts) {
+                        av_usleep(pts_time - now_time);
+                    }
+                    if ((ret = av_interleaved_write_frame(ofmt_ctx, &audio_output_pkt)) < 0) {
+                        printf("Failed to write audio pkt.\n");
+                        return -1;
+                    }
+                }
+                av_packet_unref(&audio_output_pkt);
+            }
+        }
+    }
     av_packet_free(&pktEnc);
     av_packet_free(&pkt);
     av_frame_free(&frame);
