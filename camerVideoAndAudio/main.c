@@ -150,7 +150,7 @@ int main(int argc, char* argv[]) {
     ocodec_ctx_v->bit_rate = 300000;
     ocodec_ctx_v->gop_size = 250;
     ocodec_ctx_v->codec_type = AVMEDIA_TYPE_VIDEO;
-#if 1
+#if 0
     // h264 params
     ocodec_ctx_v->qmin = 10;
     ocodec_ctx_v->qmax = 51;
@@ -162,7 +162,7 @@ int main(int argc, char* argv[]) {
     if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
         ocodec_ctx_v->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
-    avcodec_open2(ocodec_ctx_v, ocodec_v, &params);
+    avcodec_open2(ocodec_ctx_v, ocodec_v, NULL);
     // add a new video stream to output format context
     video_st = avformat_new_stream(ofmt_ctx, ocodec_ctx_v->codec);
     if (!video_st) {

@@ -1,0 +1,13 @@
+camerVideoAndAudio
+In my windows, i use following instructios to compile:
+gcc .\main.c  -lmingw32 -lSDL2main -lSDL2 -lm -L C:\MinGW\lib\ -lavformat -lavcodec -lavutil -lavdevice -lswscale -lswresample
+Install the appropriate development kit(FFmpeg, SDL2, MinGW)
+if set h264 params, will show the following error message:
+"real-time buffer [Logitech HD Webcam C270] [video input] too full or near too full"
+This problem cannot be solved for now, so commented those code.
+
+This program use dshow to control camera(video/audio), it can not run on linux(shoule use v4l2/alsa to control viedo/audio).
+
+Also, SDL2 display function not implemented.
+
+for now, just a demo 😂.
