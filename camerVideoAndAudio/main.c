@@ -99,7 +99,7 @@ int main(int argc, char* argv[]) {
  #endif
     // init input video
 	AVDictionary *format_opts =  NULL;
-	av_dict_set_int(&format_opts, "rtbufsize", 18432000  , 0);
+	av_dict_set_int(&format_opts, "rtbufsize", 702000000, 0);
     if (avformat_open_input(&fmt_ctx_v, device_name_v, ifmt, &format_opts) < 0) {
         printf("open video device failed.\n");
         return -1;
@@ -144,8 +144,8 @@ int main(int argc, char* argv[]) {
     ocodec_ctx_v->pix_fmt = *ocodec_v->pix_fmts;
     ocodec_ctx_v->width = fmt_ctx_v->streams[video_idx]->codecpar->width;
     ocodec_ctx_v->height = fmt_ctx_v->streams[video_idx]->codecpar->height;
-    ocodec_ctx_v->time_base.num = 1/*fmt_ctx_v->streams[video_idx]->time_base.num*/;
-    ocodec_ctx_v->time_base.den = 25/*fmt_ctx_v->streams[video_idx]->time_base.den*/;
+    ocodec_ctx_v->time_base.num = 1 /*fmt_ctx_v->streams[video_idx]->r_frame_rate.num*/;
+    ocodec_ctx_v->time_base.den = 30 /*fmt_ctx_v->streams[video_idx]->r_frame_rate.den*/;
     ocodec_ctx_v->max_b_frames = 0;
     ocodec_ctx_v->bit_rate = 300000;
     ocodec_ctx_v->gop_size = 250;
@@ -308,7 +308,6 @@ int main(int argc, char* argv[]) {
                 pktEnc->dts = pktEnc->pts;
                 pktEnc->duration = av_rescale_q(calc_duration, time_base_q, time_base);
                 pktEnc->pos = -1;
-                printf("%d\n", calc_duration);
 
                 // next pts
                 vid_next_pts = framecnt * calc_duration;
@@ -427,7 +426,6 @@ int main(int argc, char* argv[]) {
                     AVRational time_base = audio_st->time_base;
                     AVRational r_framerate1 = {fmt_ctx_a->streams[audio_idx]->codecpar->sample_rate, 1};
                     int64_t calac_duration = (double) (AV_TIME_BASE) * (1 / av_q2d(r_framerate1));
-                    printf("%d\n", calac_duration);
 
                     audio_output_pkt.pts = av_rescale_q(nb_samples * calac_duration, time_base_q, time_base);
                     audio_output_pkt.dts = audio_output_pkt.pts;
